@@ -1,6 +1,6 @@
 # file-dbms
 
-`file-dbms` is a channel-first Go library for file-based SQL engines.
+`file-dbms` A pure Go library that provides an embedded file-based DBMS layer with concurrent read/write access and support for pluggable SQL backends
 
 Import path:
 
