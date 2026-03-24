@@ -1,21 +1,28 @@
 # file-dbms
 
-`file-dbms` A pure Go library that provides an embedded file-based DBMS layer with concurrent read/write access and support for pluggable SQL backends
+`file-dbms` is a Go library that provides a channel-driven queue over `database/sql`
+for file-oriented SQL engines.
 
-Import path:
+## Installation
 
-```go
-import "github.com/matveynator/file-dbms"
+```bash
+go get github.com/matveynator/file-dbms
 ```
 
-## Why this library
+## Driver registration
 
-- One serialized write lane for deterministic write order.
-- Many parallel read workers for throughput.
-- Synchronization via goroutines, channels, and `select` only.
-- Database integration through `database/sql` for engine portability.
+Import the lightweight drivers package in your binary to register SQL drivers.
 
-## Quick start (SQLite)
+```go
+import _ "github.com/matveynator/file-dbms/drivers"
+```
+
+The `drivers` directory is the extension point for additional file-based SQL backends.
+New engines can be added with build tags without changing the queue core.
+
+## Usage
+
+### SQLite quick start
 
 ```go
 package main
@@ -29,44 +36,65 @@ import (
 )
 
 func main() {
-	q, err := filedbms.OpenSQLite("example.db", 4)
+	queue, err := filedbms.OpenSQLite("example.db", 4)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer q.Close()
+	defer queue.Close()
 
-	jobs := q.Jobs()
+	jobs := queue.Jobs()
 
-	create := filedbms.SubmitWrite(
+	createResult := <-filedbms.SubmitWrite(
 		jobs,
 		`CREATE TABLE IF NOT EXISTS items (
 			id INTEGER PRIMARY KEY,
 			name TEXT NOT NULL
 		)`,
 	)
-	if res := <-create; res.Err != nil {
-		log.Fatal(res.Err)
+	if createResult.Err != nil {
+		log.Fatal(createResult.Err)
 	}
 
-	insert := filedbms.SubmitWrite(
+	insertResult := <-filedbms.SubmitWrite(
 		jobs,
 		`INSERT INTO items(name) VALUES (?)`,
 		"alpha",
 	)
-	if res := <-insert; res.Err != nil {
-		log.Fatal(res.Err)
+	if insertResult.Err != nil {
+		log.Fatal(insertResult.Err)
 	}
 
-	read := filedbms.SubmitRead(
+	readResult := <-filedbms.SubmitRead(
 		jobs,
 		`SELECT id, name FROM items ORDER BY id`,
 	)
-
-	res := <-read
-	if res.Err != nil {
-		log.Fatal(res.Err)
+	if readResult.Err != nil {
+		log.Fatal(readResult.Err)
 	}
 
-	fmt.Println(res.Rows)
+	fmt.Println(readResult.Rows)
 }
+```
+
+### Generic constructor
+
+Use `Open` when you need to control driver name and DSN directly.
+
+```go
+queue, err := filedbms.Open(filedbms.OpenConfig{
+	DriverName:   "sqlite",
+	DataSource:   "example.db",
+	ReadReplicas: 4,
+})
+```
+
+## Build tags
+
+- SQLite registration is enabled by platform-specific tags in `drivers/sqlite.go`.
+- DuckDB registration requires CGO and the `duckdb` build tag.
+
+Example:
+
+```bash
+CGO_ENABLED=1 go build -tags duckdb
 ```

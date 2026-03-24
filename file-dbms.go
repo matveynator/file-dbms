@@ -50,6 +50,13 @@ type Result struct {
 	Err          error
 }
 
+// OpenConfig defines queue and connection settings.
+type OpenConfig struct {
+	DriverName   string
+	DataSource   string
+	ReadReplicas int
+}
+
 // Queue routes incoming tasks into one write worker and many read workers.
 type Queue struct {
 	in     chan Task
@@ -60,6 +67,63 @@ type Queue struct {
 	done chan struct{}
 
 	closers []func() error
+}
+
+// -----------------------------------------------------------------------------
+// Public constructors
+// -----------------------------------------------------------------------------
+
+// Open constructs a queue for any database/sql driver.
+func Open(config OpenConfig) (*Queue, error) {
+	if config.DriverName == "" {
+		return nil, errors.New("filedbms: driver name cannot be empty")
+	}
+	if config.DataSource == "" {
+		return nil, errors.New("filedbms: data source cannot be empty")
+	}
+	if config.ReadReplicas < 1 {
+		return nil, errors.New("filedbms: read replicas must be >= 1")
+	}
+
+	writerDB, err := sql.Open(config.DriverName, config.DataSource)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := writerDB.Ping(); err != nil {
+		_ = writerDB.Close()
+		return nil, err
+	}
+
+	readerDBs := make([]*sql.DB, 0, config.ReadReplicas)
+	for range config.ReadReplicas {
+		readerDB, err := sql.Open(config.DriverName, config.DataSource)
+		if err != nil {
+			closeAll(readerDBs)
+			_ = writerDB.Close()
+			return nil, err
+		}
+
+		if err := readerDB.Ping(); err != nil {
+			_ = readerDB.Close()
+			closeAll(readerDBs)
+			_ = writerDB.Close()
+			return nil, err
+		}
+
+		readerDBs = append(readerDBs, readerDB)
+	}
+
+	return startQueue(writerDB, readerDBs), nil
+}
+
+// OpenSQLite constructs a queue configured for the modernc SQLite driver.
+func OpenSQLite(path string, readReplicas int) (*Queue, error) {
+	return Open(OpenConfig{
+		DriverName:   "sqlite",
+		DataSource:   path,
+		ReadReplicas: readReplicas,
+	})
 }
 
 // Jobs returns the public input channel for tasks.
@@ -115,6 +179,10 @@ func SubmitWrite(jobs chan<- Task, query string, args ...any) <-chan Result {
 
 	return reply
 }
+
+// -----------------------------------------------------------------------------
+// Internal runtime pipeline
+// -----------------------------------------------------------------------------
 
 // startQueue builds the internal pipeline.
 //
@@ -340,5 +408,11 @@ func normalizeValue(v any) any {
 		return string(x)
 	default:
 		return x
+	}
+}
+
+func closeAll(dbs []*sql.DB) {
+	for _, db := range dbs {
+		_ = db.Close()
 	}
 }
